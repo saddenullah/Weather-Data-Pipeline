@@ -1,0 +1,21 @@
+# Python virtual environment
+.venv/
+
+# Environment variables and secret API keys
+.env
+.env.*
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Logs
+logs/
+*.log
+
+# Local data files
+data/*.csv
+data/*.json
+
+# VS Code settings
+.vscode/
