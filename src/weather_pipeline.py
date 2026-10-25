@@ -1,15 +1,23 @@
 
 """Weather Data Pipeline & Dashboard project."""
 
+
 import logging
+import os
+import math
 from pathlib import Path
 
 import pandas as pd
 import requests
-import math
+from dotenv import load_dotenv
+from sqlalchemy import URL, create_engine, text
+
 
 # Logging configuration
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Load database settings from the project's .env file
+load_dotenv(PROJECT_ROOT / ".env")
+
 LOG_DIR = PROJECT_ROOT / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -21,6 +29,98 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+def get_database_engine():
+    
+    """Create a SQLAlchemy engine for the PostgreSQL database."""
+
+    db_user = os.getenv("DB_USER")
+    db_password = os.getenv("DB_PASSWORD")
+    db_host = os.getenv("DB_HOST")
+    db_port = os.getenv("DB_PORT")
+    db_name = os.getenv("DB_NAME")
+
+    if not all([db_user, db_password, db_host, db_port, db_name]):
+        raise ValueError(
+            "Database settings missing. Check the project's .env file."
+        )
+
+    database_url = URL.create(
+        drivername="postgresql+psycopg",
+        username=db_user,
+        password=db_password,
+        host=db_host,
+        port=int(db_port),
+        database=db_name,
+        )
+
+    return create_engine(database_url, pool_pre_ping=True)
+
+
+
+def load_weather_to_database(df):
+    """Load weather records into PostgreSQL without duplicate inserts."""
+
+    engine = get_database_engine()
+
+    try:
+        database_df = df.rename(
+            columns={
+                "humidity_percent": "relative_humidity",
+                "feels_like_c": "apparent_temperature_c",
+            }
+        ).copy()
+
+        # Fields not currently provided by our API request
+        # Ensure the API fields are available for database loading
+        database_df["is_day"] = df["is_day"]
+        database_df["precipitation_mm"] = df["precipitation_mm"]
+        database_df["weather_code"] = df["weather_code"]
+
+        records = database_df.to_dict(orient="records")
+
+        insert_query = text("""
+            INSERT INTO public.weather_data (
+                city,
+                temperature_c,
+                relative_humidity,
+                apparent_temperature_c,
+                is_day,
+                precipitation_mm,
+                weather_code,
+                wind_speed_kmh,
+                weather_time
+            )
+            VALUES (
+                :city,
+                :temperature_c,
+                :relative_humidity,
+                :apparent_temperature_c,
+                :is_day,
+                :precipitation_mm,
+                :weather_code,
+                :wind_speed_kmh,
+                :weather_time
+            )
+            ON CONFLICT (city, weather_time) DO NOTHING;
+        """)
+
+        with engine.begin() as connection:
+            connection.execute(insert_query, records)
+
+        logger.info(
+            "Database load attempted for %s weather records.",
+            len(records),
+        )
+        print(
+            f"Database load completed. Records processed: {len(records)}"
+        )
+
+    finally:
+        engine.dispose()
+
+
+
 
 
 # Project ke main folder ka path
@@ -54,7 +154,10 @@ def fetch_weather(city):
             "temperature_2m,"
             "relative_humidity_2m,"
             "apparent_temperature,"
-            "wind_speed_10m"
+            "wind_speed_10m,"
+            "precipitation,"
+            "weather_code,"
+            "is_day"
         ),
         "timezone": "auto",
     }
@@ -72,6 +175,9 @@ def fetch_weather(city):
     humidity = current["relative_humidity_2m"]
     temperature = current["temperature_2m"]
     wind_speed = current["wind_speed_10m"]
+    precipitation = current["precipitation"]
+    weather_code = current["weather_code"]
+    is_day = current["is_day"]
     
     
     feels_like = current["apparent_temperature"]
@@ -83,6 +189,9 @@ def fetch_weather(city):
         "temperature": temperature,
         "wind_speed": wind_speed,
         "feels_like": feels_like,
+        "precipitation": precipitation,
+        "weather_code": weather_code,
+        "is_day": is_day,
         "weather_time": weather_time,
     }
 
@@ -121,9 +230,11 @@ def fetch_weather(city):
         "humidity_percent": humidity,
         "feels_like_c": feels_like,
         "wind_speed_kmh": wind_speed,
+        "precipitation_mm": precipitation,
+        "weather_code": weather_code,
+        "is_day": is_day,
         "weather_time": weather_time,
     }
-
 
 def main():
     """Run the weather data pipeline."""
@@ -205,6 +316,15 @@ def main():
 
         output_file = output_dir / "weather_data.csv"
         df.to_csv(output_file, index=False)
+        
+        
+        # Load weather data into PostgreSQL
+        try:
+            load_weather_to_database(df)
+        except Exception as error:
+            logger.exception("Failed to load weather data into PostgreSQL")
+            print(f"PostgreSQL load failed: {error}")
+
         
         
         # Save historical data without duplicate observations
